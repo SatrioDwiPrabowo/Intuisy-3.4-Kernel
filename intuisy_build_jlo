@@ -1,0 +1,8 @@
+# pemilihan toolchain
+XSSDP_TOOLCHAIN=/home/prabowo78/android/kernel/Toolchains/arm-eabi-linaro-4.7/bin/
+# konfigurasi untuk Xperia J
+export ARCH=arm export CROSS_COMPILE=${XSSDP_TOOLCHAIN}arm-eabi-
+# konfigurasi menu
+make intuisy_JLO_defconfig
+# konfigurasi menu
+make menuconfig
