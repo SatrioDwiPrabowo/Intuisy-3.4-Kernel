@@ -30,77 +30,153 @@
 
 #include <asm/div64.h>
 
-enum { ASYNC, SYNC };
-
-/* Tunables */
-static const int sync_read_expire = HZ / 2;	/* max time before a sync read is submitted. */
-static const int sync_write_expire = 2 * HZ;	/* max time before a sync write is submitted. */
-
-static const int async_read_expire = 4 * HZ;	/* ditto for async, these limits are SOFT! */
-static const int async_write_expire = 16 * HZ;	/* ditto for async, these limits are SOFT! */
-
-static const int writes_starved = 2;	/* max times reads can starve a write */
-static const int fifo_batch = 8;	/* # of sequential requests treated as one
-by the above parameters. For throughput. */
-
-/* Elevator data */
-struct sio_data {
-/* Request queues */
-struct list_head fifo_list[2][2];
-
-/* Attributes */
-unsigned int batched;
-unsigned int starved;
-
-/* Settings */
-int fifo_expire[2][2];
-int fifo_batch;
-int writes_starved;
+enum vr_data_dir {
+ASYNC,
+SYNC,
 };
 
-static void
-sio_merged_requests(struct request_queue *q, struct request *rq,
-struct request *next)
+enum vr_head_dir {
+FORWARD,
+BACKWARD,
+};
+
+static const int sync_expire = HZ / 2; /* max time before a sync is submitted. */
+static const int async_expire = 5 * HZ; /* ditto for async, these limits are SOFT! */
+static const int fifo_batch = 1;
+static const int rev_penalty = 1; /* penalty for reversing head direction */
+
+struct vr_data {
+struct rb_root sort_list;
+struct list_head fifo_list[2];
+
+struct request *next_rq;
+struct request *prev_rq;
+
+unsigned int nbatched;
+sector_t last_sector; /* head position */
+int head_dir;
+
+/* tunables */
+int fifo_expire[2];
+int fifo_batch;
+int rev_penalty;
+};
+
+static void vr_move_request(struct vr_data *, struct request *);
+
+static inline struct vr_data *
+vr_get_data(struct request_queue *q)
 {
-/*
-* If next expires before rq, assign its expire time to rq
-* and move into next position (next will be deleted) in fifo.
-*/
-if (!list_empty(&rq->queuelist) && !list_empty(&next->queuelist)) {
-if (time_before(rq_fifo_time(next), rq_fifo_time(rq))) {
-list_move(&rq->queuelist, &next->queuelist);
-rq_set_fifo_time(rq, rq_fifo_time(next));
-}
+return q->elevator->elevator_data;
 }
 
-/* Delete next request */
-rq_fifo_clear(next);
+static void
+vr_add_rq_rb(struct vr_data *vd, struct request *rq)
+{
+//struct request *alias = elv_rb_add(&vd->sort_list, rq);
+//
+//if (unlikely(alias)) {
+//vr_move_request(vd, alias);
+//alias = elv_rb_add(&vd->sort_list, rq);
+//BUG_ON(alias);
+//}
+elv_rb_add(&vd->sort_list, rq);
+if (blk_rq_pos(rq) >= vd->last_sector) {
+if (!vd->next_rq || blk_rq_pos(vd->next_rq) > blk_rq_pos(rq))
+vd->next_rq = rq;
+}
+else {
+if (!vd->prev_rq || blk_rq_pos(vd->prev_rq) < blk_rq_pos(rq))
+vd->prev_rq = rq;
+}
+
+BUG_ON(vd->next_rq && vd->next_rq == vd->prev_rq);
+BUG_ON(vd->next_rq && vd->prev_rq && blk_rq_pos(vd->next_rq) < blk_rq_pos(vd->prev_rq));
 }
 
 static void
-vr_add_request(struct request_queue *q, struct request *rq)
+vr_del_rq_rb(struct vr_data *vd, struct request *rq)
 {
-struct sio_data *sd = q->elevator->elevator_data;
-const int sync = rq_is_sync(rq);
-const int data_dir = rq_data_dir(rq);
 /*
 * We might be deleting our cached next request.
 * If so, find its sucessor.
 */
+
+if (vd->next_rq == rq)
+vd->next_rq = elv_rb_latter_request(NULL, rq);
+else if (vd->prev_rq == rq)
+vd->prev_rq = elv_rb_former_request(NULL, rq);
+
+BUG_ON(vd->next_rq && vd->next_rq == vd->prev_rq);
+BUG_ON(vd->next_rq && vd->prev_rq && blk_rq_pos(vd->next_rq) < blk_rq_pos(vd->prev_rq));
+
+elv_rb_del(&vd->sort_list, rq);
+}
 
 /*
 * add rq to rbtree and fifo
 */
 static void
 vr_add_request(struct request_queue *q, struct request *rq)
-struct request *next)
 {
 struct vr_data *vd = vr_get_data(q);
 const int dir = rq_is_sync(rq);
+
+vr_add_rq_rb(vd, rq);
+
+if (vd->fifo_expire[dir]) {
+rq_set_fifo_time(rq, jiffies + vd->fifo_expire[dir]);
+list_add_tail(&rq->queuelist, &vd->fifo_list[dir]);
 }
+}
+
 /*
-* If next expires before rq, assign its expire time to rq
-* and move into next position (next will be deleted) in fifo.
+* remove rq from rbtree and fifo.
+*/
+static void
+vr_remove_request(struct request_queue *q, struct request *rq)
+{
+struct vr_data *vd = vr_get_data(q);
+
+rq_fifo_clear(rq);
+vr_del_rq_rb(vd, rq);
+}
+
+static int
+vr_merge(struct request_queue *q, struct request **rqp, struct bio *bio)
+{
+sector_t sector = bio->bi_sector + bio_sectors(bio);
+struct vr_data *vd = vr_get_data(q);
+struct request *rq = elv_rb_find(&vd->sort_list, sector);
+
+if (rq && elv_rq_merge_ok(rq, bio)) {
+*rqp = rq;
+return ELEVATOR_FRONT_MERGE;
+}
+return ELEVATOR_NO_MERGE;
+}
+
+static void
+vr_merged_request(struct request_queue *q, struct request *req, int type)
+{
+struct vr_data *vd = vr_get_data(q);
+
+/*
+* if the merge was a front merge, we need to reposition request
+*/
+if (type == ELEVATOR_FRONT_MERGE) {
+vr_del_rq_rb(vd, req);
+vr_add_rq_rb(vd, req);
+}
+}
+
+static void
+vr_merged_requests(struct request_queue *q, struct request *rq,
+struct request *next)
+{
+/*
+* if next expires before rq, assign its expire time to rq
+* and move into next position (next will be deleted) in fifo
 */
 if (!list_empty(&rq->queuelist) && !list_empty(&next->queuelist)) {
 if (time_before(rq_fifo_time(next), rq_fifo_time(rq))) {
@@ -109,16 +185,125 @@ rq_set_fifo_time(rq, rq_fifo_time(next));
 }
 }
 
-/* Delete next request */
-rq_fifo_clear(next);
+vr_remove_request(q, next);
 }
 
 /*
-* Add request to the proper fifo list and set its
-* expire time.
+* move an entry to dispatch queue
 */
-rq_set_fifo_time(rq, jiffies + sd->fifo_expire[sync][data_dir]);
-list_add_tail(&rq->queuelist, &sd->fifo_list[sync][data_dir]);
+static void
+vr_move_request(struct vr_data *vd, struct request *rq)
+{
+struct request_queue *q = rq->q;
+
+if (blk_rq_pos(rq) > vd->last_sector)
+vd->head_dir = FORWARD;
+else
+vd->head_dir = BACKWARD;
+
+vd->last_sector = blk_rq_pos(rq);
+vd->next_rq = elv_rb_latter_request(NULL, rq);
+vd->prev_rq = elv_rb_former_request(NULL, rq);
+
+BUG_ON(vd->next_rq && vd->next_rq == vd->prev_rq);
+
+vr_remove_request(q, rq);
+elv_dispatch_add_tail(q, rq);
+vd->nbatched++;
+}
+
+/*
+* get the first expired request in direction ddir
+*/
+static struct request *
+vr_expired_request(struct vr_data *vd, int ddir)
+{
+struct request *rq;
+
+if (list_empty(&vd->fifo_list[ddir]))
+return NULL;
+
+rq = rq_entry_fifo(vd->fifo_list[ddir].next);
+if (time_after(jiffies, rq_fifo_time(rq)))
+return rq;
+
+return NULL;
+}
+
+/*
+* Returns the oldest expired request
+*/
+static struct request *
+vr_check_fifo(struct vr_data *vd)
+{
+struct request *rq_sync = vr_expired_request(vd, SYNC);
+struct request *rq_async = vr_expired_request(vd, ASYNC);
+
+if (rq_async && rq_sync) {
+if (time_after(rq_fifo_time(rq_async), rq_fifo_time(rq_sync)))
+return rq_sync;
+}
+else if (rq_sync)
+return rq_sync;
+
+return rq_async;
+}
+
+/*
+* Return the request with the lowest penalty
+*/
+static struct request *
+vr_choose_request(struct vr_data *vd)
+{
+int penalty = (vd->rev_penalty) ? : INT_MAX;
+struct request *next = vd->next_rq;
+struct request *prev = vd->prev_rq;
+sector_t next_pen, prev_pen;
+
+BUG_ON(prev && prev == next);
+
+if (!prev)
+return next;
+else if (!next)
+return prev;
+
+/* At this point both prev and next are defined and distinct */
+
+next_pen = blk_rq_pos(next) - vd->last_sector;
+prev_pen = vd->last_sector - blk_rq_pos(prev);
+
+if (vd->head_dir == FORWARD)
+next_pen = do_div(next_pen, penalty);
+else
+prev_pen = do_div(prev_pen, penalty);
+
+if (next_pen <= prev_pen)
+return next;
+
+return prev;
+}
+
+static int
+vr_dispatch_requests(struct request_queue *q, int force)
+{
+struct vr_data *vd = vr_get_data(q);
+struct request *rq = NULL;
+
+/* Check for and issue expired requests */
+if (vd->nbatched > vd->fifo_batch) {
+vd->nbatched = 0;
+rq = vr_check_fifo(vd);
+}
+
+if (!rq) {
+rq = vr_choose_request(vd);
+if (!rq)
+return 0;
+}
+
+vr_move_request(vd, rq);
+
+return 1;
 }
 
 #if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,38)
@@ -261,6 +446,6 @@ elv_unregister(&iosched_vr);
 module_init(vr_init);
 module_exit(vr_exit);
 
-MODULE_AUTHOR("Aaron Carroll");
+MODULE_AUTHOR("Aaron Carroll Ported by XSSDP");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("V(R) IO scheduler");
