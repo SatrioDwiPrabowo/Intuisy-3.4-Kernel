@@ -1,7 +1,7 @@
 If you using this source this is a method for compile kenel's
 
 1. Use toolchain from here https://github.com/SatrioDwiPrabowo/Android-Toolchain-GCC
-2. Use config intuisy_JLO_defconfig
+2. Use config intuisy_JLO_defconfig Configuration files can be found in arch/arm/configs.
 3. Requements use GCC Toolchain 4.7 inside folder source
 
 	/* Don't forget for visit my web blog here http://satriodwiprabowo.blogspot.com for get more information */
