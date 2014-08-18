@@ -1,8 +1,16 @@
-	Kernel has been repaired sorry all commits file removed i'm hardwork for repaired this source 
-	thanks for you attention but all commits has been added on this source not 100% 
+If you using this source this is a method for compile kenel's
+
+1. Use toolchain from here https://github.com/SatrioDwiPrabowo/Android-Toolchain-GCC
+2. Use config intuisy_JLO_defconfig
+3. Requements use GCC Toolchain 4.7 inside folder source
+
+	/* Don't forget for visit my web blog here http://satriodwiprabowo.blogspot.com for get more information */
 	
-	
-	
+
+
+
+
+
 	Linux kernel release 3.x <http://kernel.org/>
 
 These are the release notes for Linux version 3.  Read them carefully,
