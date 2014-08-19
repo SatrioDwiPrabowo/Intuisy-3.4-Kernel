@@ -151,6 +151,15 @@ Finally, the [KMG] suffix is commonly described after a number of kernel
 parameter values. These 'K', 'M', and 'G' letters represent the _binary_
 multipliers 'Kilo', 'Mega', and 'Giga', equalling 2^10, 2^20, and 2^30
 bytes respectively. Such letter suffixes can also be entirely omitted.
+	irqaffinity=	[SMP] Set the default irq affinity mask
+			Format:
+			<cpu number>,...,<cpu number>
+			or
+			<cpu number>-<cpu number>
+			(must be a positive range in ascending order)
+			or a mixture
+			<cpu number>,...,<cpu number>-<cpu number>
+
 
 
 	acpi=		[HW,ACPI,X86]
@@ -2434,6 +2443,14 @@ bytes respectively. Such letter suffixes can also be entirely omitted.
 	sbni=		[NET] Granch SBNI12 leased line adapter
 
 	sched_debug	[KNL] Enables verbose scheduler debug messages.
+	skew_tick=	[KNL] Offset the periodic timer tick per cpu to mitigate
+			xtime_lock contention on larger systems, and/or RCU lock
+			contention on all systems with CONFIG_MAXSMP set.
+			Format: { "0" | "1" }
+			0 -- disable. (may be 1 via CONFIG_CMDLINE="skew_tick=1"
+			1 -- enable.
+			Note: increases power consumption, thus should only be
+			enabled if running jitter sensitive (HPC/RT) workloads.
 
 	security=	[SECURITY] Choose a security module to enable at boot.
 			If this boot parameter is not specified, only the first
